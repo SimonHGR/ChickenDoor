@@ -11,22 +11,26 @@
  */
 
 #define LED_PIN              13
-#define SHOW_IRQ_LIFE
+#define END_STOP              8
+#define LDR_PORT              0
 #define TCCR1B_PRESCALE_MASK 0xE0
+#define DOOR_STROKE       14700
 
 //=======================================
 // speed 300.03 steps/second
-int countOCR1A  = 6666;  // 
-int prescale    = 0x0A;  // 8
+const int countOCR1A  = 6666;  // 
+const int prescale    = 0x0A;  // 8
+const int hertz       = 300;
 //=======================================
 
 // null routine
 void idle() {}
 
 void (* volatile isr)() = idle;
-#ifdef SHOW_IRQ_LIFE
 volatile long lifeCounter = 0;
-#endif
+volatile int lightSampleTrigger = 0;
+
+volatile int initISRcounter = 0;
 
 //------------------------------------------------
 
@@ -51,6 +55,17 @@ void setStepOutputForPosition(int pos) {
   
   for (int pinID = 0; pinID < 4; pinID++) {
     digitalWrite(STEP_PINS[pinID], positions[pos][pinID]);
+  }
+}
+
+void initialOpenDoor() {
+  initISRcounter++;
+  if (digitalRead(END_STOP)) {
+    currentPosition++;
+    setStepOutputForPosition(currentPosition % 4);
+  } else {
+    currentPosition = targetPosition = ZERO_POSITION;
+    isr = idle;
   }
 }
 
@@ -83,12 +98,12 @@ void initStepper() {
 // master interrupt service routine 
 ISR(TIMER1_COMPA_vect)
 {
-#ifdef SHOW_IRQ_LIFE
   lifeCounter++;
-  if (lifeCounter % 300 == 0) {
+  if (lifeCounter % hertz == 0) { // once per second
       digitalWrite(LED_PIN, digitalRead(LED_PIN) ^ 1);
+      lightSampleTrigger++;
   }
-#endif
+
   // call supporting mode behavior
   (*isr)();
 }
@@ -116,18 +131,86 @@ void setModeTarget(unsigned long target) {
   isr = stepMotor;
 }
 
+void closeDoor() {
+  setModeTarget(currentPosition - DOOR_STROKE);
+}
+
 void setup() {
   Serial.begin(9600);
-  Serial.println("Command (stop, up, down, pos):");
+  Serial.println("Command (init, stop, up, down, debug):");
 
   pinMode(LED_PIN, OUTPUT);
+  pinMode(END_STOP, INPUT_PULLUP);
   initStepper();
+}
+
+boolean day = true;
+int lightThreshold = 800;
+int lightHysteresis = 50;
+const int lightInterval = 3;
+const int LIGHT_SAMPLE_COUNT = 20;
+int lightSamples[LIGHT_SAMPLE_COUNT];
+int thisSample = 0;
+int validSamples = 0;
+
+boolean looksLikeNight() {
+  // check if all samples indicate nighttime
+  boolean night = true; // tenative
+  // looking for dark
+  for (int idx = 0; night && idx < LIGHT_SAMPLE_COUNT; idx++) {
+    if (lightSamples[idx] < (lightThreshold + lightHysteresis)) {
+      night = false;
+    }
+  }
+  return night;  
+}
+
+boolean looksLikeDay() {
+  // check if all samples indicate daytime
+  boolean day = true; // tenative
+  // looking for light
+  for (int idx = 0; day && idx < LIGHT_SAMPLE_COUNT; idx++) {
+    if (lightSamples[idx] > (lightThreshold - lightHysteresis)) {
+      day = false;
+    }
+  }
+  return day;  
+}
+
+void processLight(int triggerSample) {
+  if (triggerSample % lightInterval == 0) {
+    lightSamples[thisSample++] = analogRead(LDR_PORT);
+    thisSample %= LIGHT_SAMPLE_COUNT;
+    if (validSamples < LIGHT_SAMPLE_COUNT) {
+      validSamples++;
+    } else {
+      if (day) {
+        if (looksLikeNight()) {
+          Serial.println("Going to bed");
+          day = false;
+          closeDoor();
+        }
+      } else {
+        if (looksLikeDay()) {
+          Serial.println("Waking up");
+          day = true;
+          isr = initialOpenDoor;
+        }
+      }
+    }
+  }
 }
 
 char inData[128];
 int dataCount = 0;
+int lastLightSample = 0;
 
 void loop() {
+  if (lightSampleTrigger != lastLightSample) {
+    lastLightSample = lightSampleTrigger;
+    processLight(lightSampleTrigger);  
+  }
+  
   while (Serial.available() > 0) {
     char charRead = Serial.read();
     if (charRead == 0x0A || charRead == 0x0D) {
@@ -135,15 +218,32 @@ void loop() {
       if (strcmp(inData, "stop") == 0) {
         targetPosition = currentPosition;
         isr = idle;
+      } else if (strcmp(inData, "init") == 0) {
+        isr = initialOpenDoor;
       } else if (strcmp(inData, "down") == 0) {
         setModeTarget(currentPosition - 1000);
       } else if (strcmp(inData, "up") == 0) {
         setModeTarget(currentPosition + 1000);
-      } else if (strcmp(inData, "pos") == 0) {
+      } else if (strcmp(inData, "debug") == 0) {
+        Serial.print("initISRcount: ");
+        Serial.println(initISRcounter);
         Serial.print("Position:        " );
         Serial.println(currentPosition);
         Serial.print("Target position: ");
         Serial.println(targetPosition);
+        boolean endStop = digitalRead(END_STOP);
+        Serial.print("End stop is: ");
+        Serial.println(endStop);
+        if (validSamples >= LIGHT_SAMPLE_COUNT) {
+          Serial.print("light readings:" );
+          if (looksLikeDay()) Serial.println("day-like");
+          if (looksLikeNight()) Serial.println("night-like");
+          for (int idx = 0; idx < LIGHT_SAMPLE_COUNT; idx++) {
+            Serial.println(lightSamples[idx]);
+          }
+        } else {
+          Serial.println("Light not yet valid");
+        }
       } else {
         Serial.println("Huh?");
       }
