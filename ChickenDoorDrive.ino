@@ -14,7 +14,7 @@
 #define END_STOP              8
 #define LDR_PORT              0
 #define TCCR1B_PRESCALE_MASK 0xE0
-#define DOOR_STROKE       14700
+#define DOOR_STROKE       14000
 
 //=======================================
 // speed 300.03 steps/second
@@ -204,8 +204,16 @@ void processLight(int triggerSample) {
 char inData[128];
 int dataCount = 0;
 int lastLightSample = 0;
+int initCountDown = 100;
 
 void loop() {
+  if (initCountDown > 0) {
+    initCountDown--;
+    delay(1);
+    if (initCountDown == 0) {
+      isr = initialOpenDoor;
+    }
+  }
   if (lightSampleTrigger != lastLightSample) {
     lastLightSample = lightSampleTrigger;
     processLight(lightSampleTrigger);  
@@ -225,6 +233,7 @@ void loop() {
       } else if (strcmp(inData, "up") == 0) {
         setModeTarget(currentPosition + 1000);
       } else if (strcmp(inData, "debug") == 0) {
+        Serial.println("---------------------------");
         Serial.print("initISRcount: ");
         Serial.println(initISRcounter);
         Serial.print("Position:        " );
@@ -242,8 +251,11 @@ void loop() {
             Serial.println(lightSamples[idx]);
           }
         } else {
-          Serial.println("Light not yet valid");
+          Serial.print(validSamples);
+          Serial.print(" light samples, current is: ");
+          Serial.println(analogRead(0));
         }
+        Serial.println("---------------------------");
       } else {
         Serial.println("Huh?");
       }
